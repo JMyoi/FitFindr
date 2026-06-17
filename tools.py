@@ -4,8 +4,6 @@ tools.py
 The three required FitFindr tools. Each tool is a standalone function that
 can be called and tested independently before being wired into the agent loop.
 
-Complete and test each tool before moving to agent.py.
-
 Tools:
     search_listings(description, size, max_price)  → list[dict]
     suggest_outfit(new_item, wardrobe)              → str
@@ -20,6 +18,8 @@ from groq import Groq
 from utils.data_loader import load_listings
 
 load_dotenv()
+
+MODEL = "llama-3.3-70b-versatile"
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────
@@ -55,22 +55,40 @@ def search_listings(
     Returns:
         A list of matching listing dicts, sorted by relevance (best match first).
         Returns an empty list if nothing matches — does NOT raise an exception.
-
-    Each listing dict has the following fields:
-        id, title, description, category, style_tags (list), size,
-        condition, price (float), colors (list), brand, platform
-
-    TODO:
-        1. Load all listings with load_listings().
-        2. Filter by max_price and size (if provided).
-        3. Score each remaining listing by keyword overlap with `description`.
-        4. Drop any listings with a score of 0 (no relevant matches).
-        5. Sort by score, highest first, and return the listing dicts.
-
-    Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+    keywords = [kw.strip().lower() for kw in description.split() if kw.strip()]
+
+    results = []
+    for item in listings:
+        # Price filter
+        if max_price is not None and item["price"] > max_price:
+            continue
+
+        # Size filter — case-insensitive substring match
+        if size is not None:
+            if size.lower() not in item["size"].lower():
+                continue
+
+        # Score by keyword hits across title (2pts), style_tags (2pts), description (1pt)
+        score = 0
+        title_lower = item["title"].lower()
+        desc_lower = item["description"].lower()
+        tags_lower = [t.lower() for t in item["style_tags"]]
+
+        for kw in keywords:
+            if kw in title_lower:
+                score += 2
+            if any(kw in tag for tag in tags_lower):
+                score += 2
+            if kw in desc_lower:
+                score += 1
+
+        if score > 0:
+            results.append((score, item))
+
+    results.sort(key=lambda x: x[0], reverse=True)
+    return [item for _, item in results]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -85,23 +103,53 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
                   wardrobe item dicts. May be empty — handle this gracefully.
 
     Returns:
-        A non-empty string with outfit suggestions.
-        If the wardrobe is empty, offer general styling advice for the item
-        rather than raising an exception or returning an empty string.
-
-    TODO:
-        1. Check whether wardrobe['items'] is empty.
-        2. If empty: call the LLM with a prompt for general styling ideas
-           (what kinds of items pair well, what vibe it suits, etc.).
-        3. If not empty: format the wardrobe items into a prompt and ask
-           the LLM to suggest specific outfit combinations using the new item
-           and named pieces from the wardrobe.
-        4. Return the LLM's response as a string.
-
-    Before writing code, fill in the Tool 2 section of planning.md.
+        A non-empty string with outfit suggestions. If the wardrobe is empty,
+        returns general styling advice for the item rather than raising an
+        exception or returning an empty string.
     """
-    # Replace this with your implementation
-    return ""
+    item_summary = (
+        f"Item: {new_item['title']}\n"
+        f"Category: {new_item['category']}\n"
+        f"Style tags: {', '.join(new_item['style_tags'])}\n"
+        f"Colors: {', '.join(new_item['colors'])}\n"
+        f"Condition: {new_item['condition']}\n"
+        f"Price: ${new_item['price']}"
+    )
+
+    wardrobe_items = wardrobe.get("items", [])
+
+    if not wardrobe_items:
+        prompt = (
+            f"A thrift shopper is considering buying this item:\n{item_summary}\n\n"
+            "They haven't described their wardrobe yet. Give them 1–2 sentences of "
+            "general styling advice — what kinds of basics pair well with this piece, "
+            "what vibe or occasion it suits, and how they might wear it. "
+            "Be specific and practical, not generic."
+        )
+    else:
+        wardrobe_lines = "\n".join(
+            f"- {w['name']} ({w['category']}, {', '.join(w['colors'])})"
+            for w in wardrobe_items
+        )
+        prompt = (
+            f"A thrift shopper is considering buying this item:\n{item_summary}\n\n"
+            f"Their current wardrobe includes:\n{wardrobe_lines}\n\n"
+            "Suggest 1–2 complete outfit combinations using the new item and specific "
+            "pieces from their wardrobe. Name the wardrobe pieces by name. "
+            "Keep it to 2–3 sentences, conversational and practical."
+        )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=200,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return "This item would look great styled with neutral basics like straight-leg jeans and white sneakers."
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -116,22 +164,32 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Returns:
         A 2–4 sentence string usable as an Instagram/TikTok caption.
-        If outfit is empty or missing, return a descriptive error message
-        string — do NOT raise an exception.
-
-    The caption should:
-    - Feel casual and authentic (like a real OOTD post, not a product description)
-    - Mention the item name, price, and platform naturally (once each)
-    - Capture the outfit vibe in specific terms
-    - Sound different each time for different inputs (use higher LLM temperature)
-
-    TODO:
-        1. Guard against an empty or whitespace-only outfit string.
-        2. Build a prompt that gives the LLM the item details and the outfit,
-           and asks for a caption matching the style guidelines above.
-        3. Call the LLM and return the response.
-
-    Before writing code, fill in the Tool 3 section of planning.md.
+        If outfit is empty or missing, returns a descriptive error message
+        string — does NOT raise an exception.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return "Could not generate a fit card: no outfit description was provided."
+
+    prompt = (
+        f"Write a 2–4 sentence Instagram/TikTok caption for this thrifted outfit.\n\n"
+        f"Thrifted item: {new_item['title']} — ${new_item['price']} from {new_item['platform']}\n"
+        f"Outfit context: {outfit}\n\n"
+        "Rules:\n"
+        "- Sound like a real person posting their OOTD, not a brand or product description\n"
+        "- Mention the item name, price, and platform naturally (each once)\n"
+        "- Capture the vibe of the outfit in specific terms\n"
+        "- Keep it casual, lowercase is fine, one emoji max\n"
+        "- 2–4 sentences only, no hashtags"
+    )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=1.2,
+            max_tokens=150,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return "Could not generate a fit card at this time."
